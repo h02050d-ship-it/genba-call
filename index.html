@@ -17,25 +17,31 @@
   h1 { font-size:20px; margin:8px 0 4px; }
   .place { color:var(--sub); font-size:14px; margin-bottom:24px; }
   .place b { color:#ffd34d; }
-  .grid { width:100%; max-width:440px; display:flex; flex-direction:column; gap:16px; }
+  .grid { width:100%; max-width:440px; display:flex; flex-direction:column; gap:20px; }
+  .card { display:flex; flex-direction:column; gap:8px; }
   .btn {
     border:none; border-radius:18px; color:#fff; font-size:26px; font-weight:700;
     padding:30px 20px; cursor:pointer; transition:transform .08s, opacity .2s;
     box-shadow:0 6px 16px rgba(0,0,0,.35); position:relative;
   }
   .btn:active { transform:scale(.97); }
-  .btn:disabled { opacity:.45; cursor:default; }
+  .btn:disabled { opacity:.5; cursor:default; }
   .btn small { display:block; font-size:14px; font-weight:400; opacity:.85; margin-top:6px; }
   .c1 { background:linear-gradient(135deg,#2d7dff,#1856c9); }
   .c2 { background:linear-gradient(135deg,#19b36b,#0f8a50); }
   .c3 { background:linear-gradient(135deg,#ff7a3d,#e0541c); }
-  #toast {
-    position:fixed; left:50%; bottom:32px; transform:translateX(-50%) translateY(40px);
-    background:#000; color:#fff; padding:14px 22px; border-radius:30px; font-size:15px;
-    opacity:0; transition:.25s; pointer-events:none; max-width:90%; text-align:center;
+  .status {
+    min-height:24px; border-radius:12px; padding:10px 14px; font-size:15px;
+    background:#141821; color:var(--sub); border:1px solid #262c38;
+    display:flex; align-items:center; gap:8px; transition:.2s;
   }
-  #toast.show { opacity:.95; transform:translateX(-50%) translateY(0); }
-  #toast.ok { background:#0f8a50; } #toast.ng { background:#c0392b; }
+  .status.hide { display:none; }
+  .status.wait { color:#ffd34d; }
+  .status.ok   { background:#0f3d28; border-color:#19b36b; color:#7ef0b0; }
+  .status.ng   { background:#3d1717; border-color:#c0392b; color:#ff9a8f; }
+  .status.err  { background:#3d2b17; border-color:#e0954c; color:#ffcf9a; }
+  .status .dot { width:9px; height:9px; border-radius:50%; background:currentColor; animation:pulse 1s infinite; }
+  @keyframes pulse { 0%,100%{opacity:.3} 50%{opacity:1} }
   footer { color:var(--sub); font-size:11px; margin-top:28px; }
 </style>
 </head>
@@ -45,62 +51,108 @@
 
   <div class="grid" id="grid"></div>
 
-  <div id="toast"></div>
   <footer>林材木店 / 現場呼出ツール</footer>
 
 <script>
-  /* ===== 設定（あとで実値に差し替え） ===== */
-  const GAS_URL    = "https://script.google.com/macros/s/AKfycbxcvQZVi497obS-nRm4MdN0tYtsaTb03n7FLFWy7oZN2vkItKm7oQO9_85WdJYxGjgaiA/exec";   // GASウェブアプリのデプロイURL
-  const SHARED_KEY = "sk-edNLrUTi9sCrAo1tJmiiA"; // GASの SHARED_KEY と一致させる
-  /* ======================================= */
+  /* ===== 設定 ===== */
+  const GAS_URL    = "https://script.google.com/macros/s/AKfycbxcvQZVi497obS-nRm4MdN0tYtsaTb03n7FLFWy7oZN2vkItKm7oQO9_85WdJYxGjgaiA/exec";
+  const SHARED_KEY = "sk-edNLrUTi9sCrAo1tJmiiA";
+  /* ================ */
 
   const PEOPLE = [
-    { key:"daiki", label:"林大樹を呼ぶ",  cls:"c1" },
-    { key:"junya", label:"林潤也を呼ぶ",  cls:"c2" },
-    { key:"kaede", label:"林楓を呼ぶ",    cls:"c3" },
+    { key:"daiki", name:"林大樹", label:"林大樹を呼ぶ", cls:"c1" },
+    { key:"junya", name:"林潤也", label:"林潤也を呼ぶ", cls:"c2" },
+    { key:"kaede", name:"林楓",   label:"林楓を呼ぶ",   cls:"c3" },
   ];
 
+  const POLL_MS = 3000;       // 返信ポーリング間隔
+  const POLL_TIMEOUT = 180000; // 返信待ち上限(3分)
+  const COOLDOWN = 8000;       // 連打防止
+
   const grid = document.getElementById("grid");
-  const toast = document.getElementById("toast");
-  let lock = false;
+  const ui = {}; // key -> {btn, status, token}
 
   PEOPLE.forEach(p => {
-    const b = document.createElement("button");
-    b.className = "btn " + p.cls;
-    b.innerHTML = p.label + "<small>加工場に呼び出します</small>";
-    b.onclick = () => call(p, b);
-    grid.appendChild(b);
+    const card = document.createElement("div");
+    card.className = "card";
+    const btn = document.createElement("button");
+    btn.className = "btn " + p.cls;
+    btn.innerHTML = p.label + "<small>加工場に呼び出します</small>";
+    btn.onclick = () => call(p);
+    const status = document.createElement("div");
+    status.className = "status hide";
+    card.appendChild(btn);
+    card.appendChild(status);
+    grid.appendChild(card);
+    ui[p.key] = { btn, status, token: 0 };
   });
 
-  function showToast(msg, type) {
-    toast.textContent = msg;
-    toast.className = "show " + (type || "");
-    setTimeout(() => toast.className = "", 2600);
+  function setStatus(key, cls, html) {
+    const s = ui[key].status;
+    s.className = "status " + cls;
+    s.innerHTML = html;
   }
 
-  async function call(p, btn) {
-    if (lock) return;
-    if (!confirm(p.label.replace("を呼ぶ","") + "さんを加工場に呼びます。よろしいですか？")) return;
-    lock = true;
-    PEOPLE.forEach((_, i) => grid.children[i].disabled = true);
-    showToast("送信中…");
-    try {
-      const res = await fetch(GAS_URL, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain;charset=utf-8" }, // preflight回避
-        body: JSON.stringify({ key: SHARED_KEY, target: p.key, by: "現場PC" }),
-      });
-      const data = await res.json();
-      if (data.ok) showToast(p.label.replace("を呼ぶ","") + "さんに通知しました ✓", "ok");
-      else showToast("失敗：" + (data.error || data.status || "不明"), "ng");
-    } catch (e) {
-      showToast("送信エラー：通信を確認してください", "ng");
-    } finally {
-      setTimeout(() => {
-        lock = false;
-        PEOPLE.forEach((_, i) => grid.children[i].disabled = false);
-      }, 8000); // 連打・誤発防止のクールダウン
+  function call(p) {
+    const u = ui[p.key];
+    if (u.btn.disabled) return;
+    if (!confirm(p.name + "さんを加工場に呼びます。よろしいですか？")) return;
+
+    const callId = String(Date.now()) + "_" + Math.floor(Math.random()*1000);
+    u.token = callId; // 最新呼出のみ有効
+    u.btn.disabled = true;
+    setStatus(p.key, "wait", '<span class="dot"></span>送信中…');
+
+    // 送信（no-corsで確実に投げる。結果は下のポーリングで確認）
+    fetch(GAS_URL, {
+      method: "POST",
+      mode: "no-cors",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ key: SHARED_KEY, target: p.key, by: "現場PC", callId }),
+    }).catch(()=>{});
+
+    setStatus(p.key, "wait", '<span class="dot"></span>' + p.name + 'さんを呼出中… 返信待ち');
+    poll(p, callId, Date.now());
+
+    setTimeout(() => { if (ui[p.key].token === callId || true) u.btn.disabled = false; }, COOLDOWN);
+  }
+
+  function poll(p, callId, startedAt) {
+    const u = ui[p.key];
+    if (u.token !== callId) return;                 // 新しい呼出に置き換わった
+    if (Date.now() - startedAt > POLL_TIMEOUT) {
+      setStatus(p.key, "", "⌛ 返信がありませんでした（直接確認してください）");
+      return;
     }
+    jsonp(GAS_URL + "?target=" + p.key, (d) => {
+      if (u.token !== callId) return;
+      if (d && String(d.callId) === callId) {
+        if (d.pushOk === false) { setStatus(p.key, "err", "⚠️ 送信に失敗しました（通知設定/登録を確認）"); return; }
+        if (d.ans === "ok") { setStatus(p.key, "ok", "🏃 " + p.name + "さん：今行きます（" + hhmm(d.repliedAt) + "）"); return; }
+        if (d.ans === "ng") { setStatus(p.key, "ng", "🙅 " + p.name + "さん：今は行けません（" + hhmm(d.repliedAt) + "）"); return; }
+      }
+      setTimeout(() => poll(p, callId, startedAt), POLL_MS); // まだ返信なし→継続
+    }, () => {
+      setTimeout(() => poll(p, callId, startedAt), POLL_MS); // 通信失敗→継続
+    });
+  }
+
+  function hhmm(ms) {
+    const d = ms ? new Date(Number(ms)) : new Date();
+    return ("0"+d.getHours()).slice(-2) + ":" + ("0"+d.getMinutes()).slice(-2);
+  }
+
+  // JSONP（GASのCORS制約を回避してステータス取得）
+  function jsonp(url, onData, onErr) {
+    const cb = "cb_" + Math.random().toString(36).slice(2);
+    const s = document.createElement("script");
+    let done = false;
+    const cleanup = () => { delete window[cb]; if (s.parentNode) s.parentNode.removeChild(s); };
+    window[cb] = (data) => { if (done) return; done = true; cleanup(); onData(data); };
+    s.onerror = () => { if (done) return; done = true; cleanup(); onErr && onErr(); };
+    s.src = url + (url.indexOf("?")>=0 ? "&" : "?") + "callback=" + cb + "&_=" + Date.now();
+    document.body.appendChild(s);
+    setTimeout(() => { if (!done) { done = true; cleanup(); onErr && onErr(); } }, 8000);
   }
 </script>
 </body>

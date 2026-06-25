@@ -127,8 +127,13 @@
       if (u.token !== callId) return;
       if (d && String(d.callId) === callId) {
         if (d.pushOk === false) { setStatus(p.key, "err", "⚠️ 送信に失敗しました（通知設定/登録を確認）"); return; }
-        if (d.ans === "ok") { setStatus(p.key, "ok", "🏃 " + p.name + "さん：今行きます（" + hhmm(d.repliedAt) + "）"); return; }
-        if (d.ans === "ng") { setStatus(p.key, "ng", "🙅 " + p.name + "さん：今は行けません（" + hhmm(d.repliedAt) + "）"); return; }
+        const note = d.replyText ? ' 💬「' + esc(d.replyText) + '」' : '';
+        if (d.ans === "ok") { setStatus(p.key, "ok", "🏃 " + p.name + "さん：今行きます" + note + "（" + hhmm(d.repliedAt) + "）"); return; }
+        if (d.ans === "ng") { setStatus(p.key, "ng", "🙅 " + p.name + "さん：今は行けません" + note + "（" + hhmm(d.repliedAt) + "）"); return; }
+        if (d.ans === "msg" && d.replyText) {
+          // 自由メッセージ：表示しつつ最終的な可否返信を待って継続ポーリング
+          setStatus(p.key, "wait", '<span class="dot"></span>💬 ' + p.name + "さん：" + esc(d.replyText) + "（" + hhmm(d.repliedAt) + "）");
+        }
       }
       setTimeout(() => poll(p, callId, startedAt), POLL_MS); // まだ返信なし→継続
     }, () => {
@@ -139,6 +144,11 @@
   function hhmm(ms) {
     const d = ms ? new Date(Number(ms)) : new Date();
     return ("0"+d.getHours()).slice(-2) + ":" + ("0"+d.getMinutes()).slice(-2);
+  }
+
+  // 自由メッセージ表示時のHTMLエスケープ（文面はそのまま見せる）
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
   }
 
   // JSONP（GASのCORS制約を回避してステータス取得）
